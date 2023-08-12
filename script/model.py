@@ -177,15 +177,29 @@ class GPModel:
             """
             log probability density
             """
-            #theta = jnp.concatenate([log_theta[:-2], jnp.exp(log_theta[-2:])], axis=0)
+            #theta = jnp.concatenate([jnp.exp(log_theta[:-1]), log_theta[-1:]], axis=0)
             theta = jnp.exp(log_theta)
+            lengthscale = theta[:-2]
+            variance = theta[-2]
+            obs_noise = theta[-1]
 
             # theta priors
             # p(theta) = Gamma(alpha=1, beta=6); priors are independent
             lengthscale_prior = tfp.distributions.Gamma(concentration=1, rate=6)
             variance_prior = tfp.distributions.Gamma(concentration=1, rate=6)
-            obs_noise_prior = tfp.distributions.Gamma(concentration=1, rate=400)
-            log_prior = jnp.sum(lengthscale_prior.log_prob(theta[:-2])) + variance_prior.log_prob(theta[-2]) + obs_noise_prior.log_prob(theta[-1])
+            obs_noise_prior = tfp.distributions.Gamma(concentration=1, rate=6)
+            shift = tfp.bijectors.Shift(epsilon)  # shift epsilon unit
+            shifted_lengthscale_prior = tfp.distributions.TransformedDistribution(distribution=lengthscale_prior, bijector=shift, name="ShiftedLengthscale")
+            shifted_variance_prior = tfp.distributions.TransformedDistribution(distribution=variance_prior, bijector=shift, name="ShiftedVariance")
+            shifted_obs_noise_prior = tfp.distributions.TransformedDistribution(distribution=obs_noise_prior, bijector=shift, name="ShiftedObsNoise")
+            
+            # Gamma distribution is defined on [0, inf). However, if the `log_prob` method takes an negative argument, it will return a positive
+            # value that is bigger than the log probability density at zero
+            log_prob_lengthscale = jnp.sum(jnp.where(lengthscale>=epsilon, shifted_lengthscale_prior.log_prob(lengthscale), jnp.array(jnp.log(epsilon))))
+            log_prob_variance = jnp.where(variance>=epsilon, shifted_variance_prior.log_prob(variance), jnp.array(jnp.log(epsilon)))   
+            log_prob_obs_noise = jnp.where(obs_noise>=epsilon, shifted_obs_noise_prior.log_prob(obs_noise), jnp.array(jnp.log(epsilon)))
+            #log_prior = jnp.sum(shifted_lengthscale_prior.log_prob(lengthscale)) + shifted_variance_prior.log_prob(variance) + shifted_obs_noise_prior.log_prob(obs_noise)
+            log_prior = log_prob_lengthscale + log_prob_variance + log_prob_obs_noise
 
             # marginal log likelihood
             mll = jax.jit(self.posterior.marginal_log_likelihood(self.D, negative=False))
@@ -211,10 +225,11 @@ class GPModel:
         hmc = blackjax.hmc(log_density_func, step_size, inv_mass_matrix, num_integration_steps)
 
         # sample a theta from prior distribution
-        initial_lengthscale = tfp.distributions.Gamma(jnp.array(1.), jnp.array(6.)).sample(sample_shape=(self.n_features), seed=jr.PRNGKey(self._seed))
-        initial_variance = tfp.distributions.Gamma(jnp.array(1.), jnp.array(6.)).sample(sample_shape=(1, ), seed=jr.PRNGKey(self._seed))
-        initial_obs_noise = tfp.distributions.Gamma(jnp.array(1.), jnp.array(6.)).sample(sample_shape=(1, ), seed=jr.PRNGKey(self._seed))       
-        initial_position = jnp.log(jnp.concatenate([initial_lengthscale, initial_variance, initial_obs_noise], axis=0))
+        epsilon = jnp.array(1e-14)  # to avoid numerical computation error
+        initial_lengthscale = tfp.distributions.Gamma(jnp.array(1.), jnp.array(6.)).sample(sample_shape=(self.n_features), seed=jr.PRNGKey(self._seed)) + epsilon
+        initial_variance = tfp.distributions.Gamma(jnp.array(1.), jnp.array(6.)).sample(sample_shape=(1, ), seed=jr.PRNGKey(self._seed)) + epsilon
+        initial_obs_noise = tfp.distributions.Gamma(jnp.array(1.), jnp.array(6.)).sample(sample_shape=(1, ), seed=jr.PRNGKey(self._seed)) + epsilon
+        initial_position = jnp.concatenate([initial_lengthscale, initial_variance, initial_obs_noise], axis=0)
 
         # build the kernel and inference loop
         initial_state = hmc.init(initial_position)

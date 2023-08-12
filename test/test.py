@@ -50,11 +50,11 @@ def plot_result(model, x_train, y_train, x_new, y_new, bounds):
     ## Prediction (just for visualization purpose)
     pred_mean, pred_std = model.SMs[0].inference(x_test)
     #acqs_test = pred_mean + model.j * pred_std
-    acqs_test = jnp.array([model.acqs_avg(x, model.j) for x in x_test])
+    acqs_test = jnp.array([model.acqs_avg(x, model.j) for x in x_test])  # slow
 
     # visualization
-    plt.figure(dpi=300)
     fig, ax = plt.subplots()
+    fig.set_dpi(300)
     ax.scatter(x_train, y_train, marker='o', label="Observations", color=cols[0], alpha=0.5)
     ax.plot(x_test, y_test, label="Latent function", color=cols[0], linewidth=2)
     ax.plot(x_test, pred_mean, label="Predictive mean", color=cols[1])
@@ -66,7 +66,7 @@ def plot_result(model, x_train, y_train, x_new, y_new, bounds):
     fig.savefig("../results/Bayesian/Figure_7.png")
 
 # generate initial dataset
-x_train, y_train = generate_initial_data(n=6)
+x_train, y_train = generate_initial_data(n=16)
 print(f"Initialization with {x_train.shape[0]} points")
 
 ## Gaussian process config
@@ -74,7 +74,7 @@ bounds = jnp.array([[-2.], [10.]])
 kernel_func = jaxkern.RBF()
 mean_func = gpx.mean_functions.Zero()
 model_options = {'seed': 42, 'verbose': 2, 'num_restarts': 8, 'n_iter': 5000, 
-                 'inv_mass_matrix': jnp.array([1e-2, 0.3, 1e-2]), 'step_size': 1e-3, 'num_integration': 100, 'num_hmc_samples': 300000}
+                 'inv_mass_matrix': jnp.array([0.03, 0.3, 0.1]), 'step_size': 1e-3, 'num_integration': 100, 'num_hmc_samples': 300000}
 acqs_options = {'s': 1, 'p': 0.5, 'solver_options': {'disp': False, 'maxiter': 100000}}
 optimization_options = {'HyperEst': 'bayesian', 'batch_size': 1}
 options = {'model_options': model_options, 'acqs_options': acqs_options, 'optimization_options': optimization_options}
