@@ -14,15 +14,19 @@ class BoundScaler:
         except IndexError:
             print("BOUND must be an array with 2 rows")
 
-    def transform(self, x):
-        if x.ndim == 1:
-            x = x.reshape(-1, 1)  # convert 1D array to 2D vector
-        assert(x.shape[1]==self.lb.shape[1]), "The length of input X cannot align with BOUND"
-        return (x - self.lb) / (self.ub - self.lb)
+    def transform(self, X):
+        #print(f"X shape:{X.shape}")
+        if X.ndim == 1:
+            X = X.reshape(-1, 1)  # convert 1D array to 2D vector
+        if X.shape[1]==self.lb.shape[1]:
+            return (X - self.lb) / (self.ub - self.lb)
+        elif X.shape[0] == self.lb.shape[1] and X.shape[1] == 1:
+            X = X.T
+            return (X - self.lb) / (self.ub - self.lb)
     
-    def inverse_transform(self, x):
-        assert(x.shape[1]==self.lb.shape[1]), "The length of input X cannot align with BOUND"
-        return x * (self.ub - self.lb) + self.lb 
+    def inverse_transform(self, X):
+        assert(X.shape[1]==self.lb.shape[1]), "The length of input X cannot align with BOUND"
+        return X * (self.ub - self.lb) + self.lb 
     
 
 class ZNormScaler:

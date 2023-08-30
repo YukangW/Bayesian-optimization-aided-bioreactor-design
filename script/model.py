@@ -5,6 +5,7 @@ from jax.config import config
 
 config.update("jax_enable_x64", True)
 
+
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -84,7 +85,7 @@ class GPModel:
         """
         Parameters wrapper: return a new Dictionary object with new hyperparams `theta`
         """
-        assert(len(theta)==3), "hyperparameters `theta` must be a numpy.ndarray with 3 elements"
+        assert(len(theta)>=3), "hyperparameters `theta` must be a numpy.ndarray with at least 3 elements"
         theta = jnp.array(theta)
         new_params = copy.deepcopy(original_params)
         new_params['kernel']['lengthscale'] = theta[0:-2]  # 1D array
@@ -163,7 +164,7 @@ class GPModel:
 
         # visualization
         if self._verbose == 1:
-            print(f"lengthscale: {best_learned_params['kernel']['lengthscale'].tolist()[0]:.4f}")
+            print(f"lengthscale: {best_learned_params['kernel']['lengthscale'].tolist()}")
             print(f"variance: {best_learned_params['kernel']['variance'].item():.4f}")
             print(f"obs_noise: {best_learned_params['likelihood']['obs_noise'].item():.3e}")
         
@@ -207,6 +208,7 @@ class GPModel:
 
             # log probability density of the posterior of theta
             log_posterior = log_prior + mll(new_params)
+
             return log_posterior
 
         # initialize parameter state
@@ -219,10 +221,13 @@ class GPModel:
         # Hamiltonian Monte Carlo
         #inv_mass_matrix = jnp.ones(self.n_features+2)  # `n_features` lengthscale, one variance, one obs_noise
         inv_mass_matrix = self.options.get('inv_mass_matrix', jnp.ones(self.n_features+2))
+        assert(inv_mass_matrix.shape[0] == self.n_features+2), "the shape of inv_mass_matrix must align with the number of features"
         num_integration_steps = self.options.get('num_integration', 100)
         step_size = self.options.get('step_size', 1e-3)
         num_hmc_samples = self.options.get('num_hmc_samples', 100000)
+        #num_nuts_samples = self.options.get('num_hmc_samples', 100000)
         hmc = blackjax.hmc(log_density_func, step_size, inv_mass_matrix, num_integration_steps)
+        #nuts = blackjax.nuts(log_density_func, step_size, inv_mass_matrix)
 
         # sample a theta from prior distribution
         epsilon = jnp.array(1e-14)  # to avoid numerical computation error
@@ -234,6 +239,8 @@ class GPModel:
         # build the kernel and inference loop
         initial_state = hmc.init(initial_position)
         hmc_kernel = jax.jit(hmc.step)
+        #initial_state = nuts.init(initial_position)
+        #nuts_kernel = jax.jit(nuts.step)
 
         def inference_loop(key, kernel, initial_state, num_hmc_samples):
             @jax.jit
@@ -247,60 +254,85 @@ class GPModel:
 
         # inference
         rng_key = jr.PRNGKey(self._seed)
+
         states = inference_loop(rng_key, hmc_kernel, initial_state, num_hmc_samples)
+        #states = inference_loop(rng_key, nuts_kernel, initial_state, num_nuts_samples)
+        
+        # multiple chains
+        """
+        def inference_loop_multiple_chains(key, kernel, initial_state, num_nuts_samples, num_chains):
+            @jax.jit
+            def one_step(states, key):
+                keys = jr.split(key, num_chains)
+                states, _  = jax.vmap(kernel)(keys, states)
+                return states, states
+            
+            keys = jr.split(key, num_nuts_samples)
+            _, states = jax.lax.scan(one_step, initial_state, keys)
+            return states
+        
+        num_chains = multiprocessing.cpu_count()
+        initial_positions = jnp.repeat(initial_position.reshape(1, -1), num_chains, axis=0)
+        initial_states = jax.vmap(nuts.init, in_axes=(0))(initial_positions)
+
+        states = inference_loop_multiple_chains(rng_key, nuts.step, initial_states, num_nuts_samples, num_chains)
+        """
+
         theta_samples = jnp.exp(states.position.block_until_ready())
 
         # visualization
         if self._verbose == 2:
             cols = matplotlib.rcParams["axes.prop_cycle"].by_key()["color"]
-            lengthscale_samples = theta_samples[:, 0]
-            plt.figure(dpi=200)
-            plt.plot(lengthscale_samples, color=cols[0])
-            plt.xlabel("Samples")
-            plt.ylabel("lengthscale")
-            plt.yscale('log')
-            #plt.show()
-            plt.savefig("../results/Bayesian/HMC_GP_lengthscale.png")
+            for k in range(self.n_features):
+                lengthscale_samples = theta_samples[:, k]
+                plt.figure(dpi=200)
+                plt.plot(lengthscale_samples, color=cols[0])
+                plt.xlabel("Samples")
+                plt.ylabel("lengthscale")
+                plt.yscale('log')
+                plt.savefig(f"../results/HMC/HMC_GP_lengthscale_{k}.png")
+                plt.close()
 
-            plt.figure(dpi=200)
-            sns.displot(lengthscale_samples[-num_samples:], color=cols[0])
-            plt.xlabel("lengthscale")
-            plt.ylabel("probability density")
-            #plt.show()
-            plt.savefig("../results/Bayesian/HMC_GP_lengthscale_dist.png")
-
-            variance_samples = theta_samples[:, 1]
+                
+                plt.figure(dpi=200)
+                sns.displot(lengthscale_samples[-num_samples:], color=cols[0])
+                plt.xlabel("lengthscale")
+                plt.ylabel("probability density")
+                plt.savefig(f"../results/HMC/HMC_GP_lengthscale_{k}_dist.png")
+                plt.close()
+                
+            variance_samples = theta_samples[:, -2]
             plt.figure(dpi=200)
             plt.plot(variance_samples, color=cols[1])
             plt.xlabel("Samples")
             plt.ylabel("variance")
             plt.yscale('log')
-            #plt.show()
-            plt.savefig("../results/Bayesian/HMC_GP_variance.png")
-
+            plt.savefig("../results/HMC/HMC_GP_variance.png")
+            plt.close()
+            
             plt.figure(dpi=200)
             sns.displot(variance_samples[-num_samples:], color=cols[1])
             plt.xlabel("variance")
             plt.ylabel("probability density")
-            #plt.show()
-            plt.savefig("../results/Bayesian/HMC_GP_variance_dist.png")
+            plt.savefig("../results/HMC/HMC_GP_variance_dist.png")
+            plt.close()
 
-            obs_noise_samples = theta_samples[:, 2]
+            obs_noise_samples = theta_samples[:, -1]
             plt.figure(dpi=200)
             plt.plot(obs_noise_samples, color=cols[2])
             plt.xlabel("Samples")
             plt.ylabel("obs_noise")
             plt.yscale('log')
-            #plt.show()
-            plt.savefig("../results/Bayesian/HMC_GP_obs_noise.png")
-
+            plt.savefig("../results/HMC/HMC_GP_obs_noise.png")
+            plt.close()
+            
             plt.figure(dpi=200)
             sns.displot(obs_noise_samples[-num_samples:], color=cols[2])
             plt.xlabel("obs_noise")
             plt.ylabel("probability density")
-            #plt.show()
-            plt.savefig("../results/Bayesian/HMC_GP_obs_noise_dist.png")
-        
+            plt.savefig("../results/HMC/HMC_GP_obs_noise_dist.png")
+            plt.close()
+            
         return theta_samples[-num_samples:, :]
 
     def inference(self, x):

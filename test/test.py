@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-
 import sys
 sys.path.append('..')
 
@@ -10,90 +9,118 @@ config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
 import jax.random as jr
-import jaxkern
 import jax
-import gpjax as gpx
+
 from script.model import GPModel
 from script.GP_optimizer import BayOptimizer
-import matplotlib
-from matplotlib import pyplot as plt
+from test_functions import simple_1d, func_wrapper, SyntheticFunction
+from plotting_results import plot_GPs, plot_results_1D, plot_results_2D, plot_acqs_funcs
+from initialization import generate_initial_data_1D, generate_initial_data
+from config import Config
+
+from botorch.test_functions import Branin
+from scipy.optimize import minimize
+import json
+
+import time
+# Record the start time
+start_time = time.process_time()
+time_list = []
 
 key = jr.PRNGKey(123)
 key, subkey = jr.split(key)
-cols = matplotlib.rcParams["axes.prop_cycle"].by_key()["color"]
 
-## Dataset
-def f(x):
-    """
-    Target function
-    """
-    return jnp.exp(-(x-2)**2) + jnp.exp(-(x-6)**2 / 10) + 1 / (x**2+1)
+## Target function
+#benchmark = SyntheticFunction(func=func_wrapper(Branin()), bounds=jnp.array([[-5., 0.], [10., 15.]]))
+benchmark = SyntheticFunction(func=simple_1d, bounds=jnp.array([[-2.], [10.]]))
+optimal_value = -1 * jnp.array(Branin._optimal_value)
 
-def generate_initial_data(n=16, noise=0.0):
-    """
-    Generate initial data for training
-    """
-    x_train = jnp.linspace(-2., 10., n).reshape(-1, 1)
-    #x_train = jr.uniform(key=key, shape=(n, 1)) * 12 - 2
-    y_train = f(x_train) + jr.normal(key=subkey, shape=x_train.shape) * noise
-    return x_train, y_train
+## Generate initial dataset
+N_INIT = 4
+#X_train, y_train = generate_initial_data(N_INIT, benchmark)
+X_train, y_train = generate_initial_data_1D(N_INIT, benchmark, subkey)
 
-def plot_result(model, x_train, y_train, x_new, y_new, bounds):
-    """
-    visualization
-    """
-    assert(isinstance(model, BayOptimizer)), "`model` must be an instance of BayOptimizer"
-    # data for visualization
-    x_test = jnp.linspace(*bounds, 1000)
-    y_test = f(x_test)
+# save data in JSON file
+#D = jnp.concatenate([X_train, y_train], axis=1)
+#with open("../data/AugmentedBranin_8.json", 'w') as f:
+#    json.dump(D.tolist(), f)
+#print(D)
 
-    ## Prediction (just for visualization purpose)
-    pred_mean, pred_std = model.SMs[0].inference(x_test)
-    #acqs_test = pred_mean + model.j * pred_std
-    acqs_test = jnp.array([model.acqs_avg(x, model.j) for x in x_test])  # slow
-
-    # visualization
-    fig, ax = plt.subplots()
-    fig.set_dpi(300)
-    ax.scatter(x_train, y_train, marker='o', label="Observations", color=cols[0], alpha=0.5)
-    ax.plot(x_test, y_test, label="Latent function", color=cols[0], linewidth=2)
-    ax.plot(x_test, pred_mean, label="Predictive mean", color=cols[1])
-    ax.fill_between(x_test.squeeze(), pred_mean-2*pred_std, pred_mean+2*pred_std, label="$2\sigma$", alpha=0.5, color=cols[1])
-    ax.scatter(x_new, y_new, marker='X', label="New point", color='r')
-    ax.plot(x_test, -acqs_test, label="Acquisition function", color=cols[2])
-    ax.legend()
-    #plt.show()
-    fig.savefig("../results/Bayesian/Figure_7.png")
-
-# generate initial dataset
-x_train, y_train = generate_initial_data(n=16)
-print(f"Initialization with {x_train.shape[0]} points")
+# load data from JSON file
+#with open("../data/AugmentedBranin_8.json", 'r') as f:
+#    D = jnp.array(json.load(f))
+#X_train, y_train = D[:, :-1], D[:, -1:]
+print(f"Initialization with {X_train.shape[0]} points")
 
 ## Gaussian process config
-bounds = jnp.array([[-2.], [10.]])
-kernel_func = jaxkern.RBF()
-mean_func = gpx.mean_functions.Zero()
-model_options = {'seed': 42, 'verbose': 2, 'num_restarts': 8, 'n_iter': 5000, 
-                 'inv_mass_matrix': jnp.array([0.03, 0.3, 0.1]), 'step_size': 1e-3, 'num_integration': 100, 'num_hmc_samples': 300000}
-acqs_options = {'s': 1, 'p': 0.5, 'solver_options': {'disp': False, 'maxiter': 100000}}
-optimization_options = {'HyperEst': 'bayesian', 'batch_size': 1}
-options = {'model_options': model_options, 'acqs_options': acqs_options, 'optimization_options': optimization_options}
+BATCH_SIZE = 2
+opt_config = Config(batch_size=BATCH_SIZE)
 
-## Bayesian optimization iteration
-N_ITER = 1
+## Bayesian optimization iteration (Maximization)
+N_ITER = 10  # BUDGET = 2 * 10 = 100
+max_list = [y_train.max()]
+max_so_far = y_train.max()
+
 for i in range(N_ITER):
-    print(f"Starting {i+1}th iteration")
-    x_news= [0.0] * optimization_options['batch_size']
-    y_news= [0.0] * optimization_options['batch_size']
-    bay_opt = BayOptimizer(x_train, y_train, bounds, options)
-    for m in range(optimization_options['batch_size']):
-        x_new = bay_opt.one_iter()
-        y_new = f(x_new)
-        print(f"New point {m+1}: {x_new.item():.4f}\nNew evaluation {m+1}: {y_new.item():.3f}")
-        x_news[m] = x_new.item()
-        y_news[m] = y_new.item()
+    iter_start_time = time.process_time()
 
-    plot_result(bay_opt, x_train, y_train, x_news, y_news, bounds)
-    ## add new point to the dataset
-    x_train = jnp.concatenate([x_train, jnp.array(x_news).reshape(-1, 1)], axis=0)
-    y_train = jnp.concatenate([y_train, jnp.array(y_news).reshape(-1, 1)], axis=0)
+    print(f"Starting {i+1}th iteration")
+    X_news= [0.0] * opt_config.optimization_options['batch_size']
+    y_news = [0.0] * opt_config.optimization_options['batch_size']
+    bay_opt = BayOptimizer(X_train, y_train, benchmark.bounds, opt_config.options)
+
+    sampling_end_time = time.process_time()
+    time_list.append(sampling_end_time - iter_start_time)
+    acqs_tests = []
+    for m in range(opt_config.optimization_options['batch_size']):
+        X_new = bay_opt.one_iter()[0]
+        y_new = benchmark.f(X_new)[0]
+        X_news[m] = X_new.tolist()
+        y_news[m] = y_new.tolist()
+        # plot GPs and return acquistion function
+        acqs_test = plot_GPs(bay_opt, X_train, y_train, benchmark, iteration=i, batch=m, batch_size=BATCH_SIZE)
+        acqs_tests.append(acqs_test)
+    print(f"New points: {X_news}")
+    print(f"New evaluations: {y_news}")
+
+    ## add new points to the dataset
+    X_news = jnp.array(X_news)
+    y_news = jnp.array(y_news)
+    
+    # plot acquisition functions
+    plot_acqs_funcs(bay_opt, acqs_tests, X_train, y_train, X_news, y_news, benchmark, iteration=i, batch_size=BATCH_SIZE)
+    #plot_results_2D(X_train, X_news, benchmark, N_INIT, i)
+    X_train = jnp.concatenate([X_train, X_news], axis=0)
+    y_train = jnp.concatenate([y_train, y_news], axis=0)
+
+    # update maximum so far
+    if y_news.max() >= max_so_far:
+        max_so_far = y_news.max()
+    max_list.append(max_so_far)
+    print(f"max so far:{max_so_far}\n")
+
+    iter_end_time = time.process_time()
+    time_list.append(iter_end_time - sampling_end_time)
+final_index = jnp.unravel_index(jnp.argmax(y_train), y_train.shape)  # tuple
+
+print(f"X_final: {X_train[final_index]}")
+print(f"y_final: {y_train[final_index]}")
+
+# Record the end time
+print(time_list)
+
+end_time = time.process_time()
+cpu_time = end_time - start_time
+print(f"CPU Time: {cpu_time:.3f} seconds")
+
+# save results in JSON file
+results = jnp.concatenate([X_train, y_train], axis=1)
+print(f"y_train: {results[:, -1]}")
+with open("../data/j-ATS-UCB/1D/0/simple_4_results_0.json", 'w') as f:
+    json.dump(results.tolist(), f)
+
+with open("../results/j-ATS-UCB/1D/0/simple_4_results_0.txt", 'w') as g:
+    g.write(f"{cpu_time}")
+
+with open("../data/j-ATS-UCB/1D/0/simple_4_CPU_time.json", 'w') as h:
+    json.dump(time_list, h)

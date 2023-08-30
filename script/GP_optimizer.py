@@ -16,7 +16,7 @@ import sobol_seq
 from scipy.optimize import minimize
 from script.model import GPModel
 import copy
-
+from config import cost_func
 
 class BayOptimizer:
     """
@@ -45,7 +45,7 @@ class BayOptimizer:
         self.optimization_options = self.options.get('optimization_options', {})
         self.hyper_est = self.optimization_options.get('HyperEst', 'frequentist')
 
-        self.s = self.optimization_options.get('s', 1)  # the number of surrogate models
+        self.s = self.acqs_options.get('s', 1)  # the number of surrogate models
 
         ## surrogate models
         self.mean_func = gpx.mean_functions.Zero()
@@ -54,9 +54,16 @@ class BayOptimizer:
 
         if self.hyper_est == 'bayesian':
             self.batch_size = self.optimization_options.get('batch_size', 1)
+            
+            # keys
+            rng_key = jr.PRNGKey(self.model_options.get('seed', 0))
+            self._keys = jr.split(rng_key, self.batch_size*self.s)
+            self.t = 0
+            self._last = 10000
+
             # hyperparameter sampler
             print("Start Hamiltonian Monte Carlo sampling")
-            self.theta_posterior_samples = self.SMs[0].bayesian(num_samples=10000)
+            self.theta_posterior_samples = self.SMs[0].bayesian(num_samples=self._last)
             print("Sampling finished")
 
 
@@ -71,16 +78,27 @@ class BayOptimizer:
                 model.learned_params = model.frequentist()
         elif self.hyper_est == 'bayesian':
             for model in self.SMs:
-                theta = self.theta_posterior_samples[jax.random.randint(jr.PRNGKey(self.model_options.get('seed', 0)), (), -10000, -1).item()]
-                model.learned_params = model._params_wrapper(model.original_params, theta)
+                theta = self.theta_posterior_samples[jr.randint(self._keys[self.t], (), 0, self._last-1), :]
+                model.learned_params = model._params_wrapper(self.SMs[0].original_params, theta)
+                self.t += 1
 
+        # check reliability of GP
+        for model in self.SMs:
+            pred_mean, pred_std = model.inference(self.X)
+            std_mean = pred_std.mean()
+            if std_mean > jnp.array(0.1): 
+                print(f"Underfitting warning! Avg pred std of training set: {pred_std.mean()}")
+            mae = jnp.abs(pred_mean.reshape(-1, 1)-self.y).mean()
+            if mae > jnp.array(0.1):
+                print(f"Underfitting warning! Avg MAE of training set: {mae}")
+    
     @staticmethod
     def get_acqs(model):
         """
         Get the acquisition function of surrogate model MODEL
         """
         assert(isinstance(model, GPModel)), "`model` must be an instance of GPModel"
-        
+
         @partial(jax.jit, static_argnames=['j', 'negative'])
         def ucb(X, j, negative=True):
             """
@@ -89,7 +107,21 @@ class BayOptimizer:
             pred_mean, pred_std = model.inference(X)
             sign = jnp.array(-1.) if negative else jnp.array(1.)
             return sign*(pred_mean + j * pred_std).reshape()
-        return ucb
+        
+        @partial(jax.jit, static_argnames=['j', 'negative'])
+        def mfucb(X, j, negative=True):
+            """
+            Acquisition function: multi-fidelity upper confidence bound
+            """
+            X = X.flatten()  # X must be a 1D array
+            cost = cost_func(X)
+            #X_highest_fidelity = jnp.concatenate([X[:-1], jnp.array([1.])], axis=0)  # Tom's previous work
+            beta = (jnp.array(1.) - X[-1]**2) ** 0.5 + 1
+            gamma = jnp.exp(jnp.array(1.)*(X[-1]-jnp.array(1.)))
+            pred_mean, pred_std = model.inference(X)
+            sign = jnp.array(-1.) if negative else jnp.array(1.)
+            return (sign * gamma * (pred_mean + j * beta * pred_std)/cost).reshape()
+        return mfucb
 
     def acqs_avg(self, X, j):
         """
@@ -140,7 +172,7 @@ class BayOptimizer:
             # optimize acquisition function
             acqs_func_grad = jax.grad(self.acqs_avg, (0, ))  # gradient
             # acqs_func_hessian = jax.hessian(self.acqs_avg, (0, ))  # Hessian; method SLSQP does not use Hessian information
-            res = minimize(self.acqs_avg, x_init, args=(self.j, ), method='SLSQP', jac=acqs_func_grad, options=options, bounds=bounds_tuple, tol=1e-12)
+            res = minimize(self.acqs_avg, x_init, args=(self.j, ), method='SLSQP', jac=acqs_func_grad, options=options, bounds=bounds_tuple, tol=1e-8)
             localsol[i] = res.x
             if res.success:
                 localval[i] = res.fun
